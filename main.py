@@ -1,16 +1,12 @@
+from importlib.resources import open_binary
 from queue import Queue
+from xxlimited import new
 
 class Tr:
     def __init__(self, id, ts):
         self.id = id
         self.ts = ts
         self.state = 0  # 0->active 1->commited 2->aborted
-
-
-class Table:
-    def __init__(self):
-        self.wait_list = Queue()
-
 
 class Tr_Manager:
     def __init__(self):
@@ -24,7 +20,7 @@ class Lock_Manager:
         self.wait_q = {}
 
     # adiciona shared lock no item d para a transação tr caso não exista na lock_table
-    def ls(self, tr, table):
+    def ls(self, tr, table, tr_man):
         # se tabela não tiver lockada
         if self.lock_table.get(table) == None:
             self.lock_table[table] = ['S', [tr]]
@@ -39,16 +35,18 @@ class Lock_Manager:
             return shared_lock_op
         # se a tabela for exclusive lock e não for lockado da mesma transação
         elif self.lock_table[table][0] == 'X' and self.lock_table[table][1] != [tr]:
-            if self.wait_q.get(table) == None:
+            '''if self.wait_q.get(table) == None:
                 self.wait_q[table] = Queue()
-            self.wait_q[table].put((tr, 'S'))
-            return 'conflict'
+            self.wait_q[table].put((tr, 'S'))'''
+            if tr_man[tr].ts < tr_man[self.lock_table[table][1][0]].ts:
+                return 'wound'
+            return 'wait'
         # se já houver shared ou exclusive lock da mesma transação
         else:
             return None
 
     # adiciona exclusive lock no item d para a transação tr caso não exista na lock_table
-    def lx(self, tr, table):
+    def lx(self, tr, table, tr_man):
         # se tabela não tiver lockada
         if self.lock_table.get(table) == None:
             self.lock_table[table] = ['X', [tr]]
@@ -61,12 +59,12 @@ class Lock_Manager:
             exclusive_lock_op = Operation(
                 tr=tr, table=table, action='xl')
             return exclusive_lock_op
-        # se a tabela for exclusive lock e não for lockado da mesma transação
-        elif self.lock_table[table][0] == 'X' and self.lock_table[table][1] != [tr]:
-            if self.wait_q.get(table) == None:
-                self.wait_q[table] = Queue()
-            self.wait_q[table].put((tr, 'X'))
-            return 'conflict'
+        # se a tabela for exclusive lock e não for lockado da mesma transação ou for shared lock mas houver outra transação
+        # elif self.lock_table[table][0] == 'X' and self.lock_table[table][1] != [tr]:
+        elif self.lock_table[table][1] != [tr]:
+            if tr_man[tr].ts < tr_man[self.lock_table[table][1][0]].ts:
+                return 'wound'
+            return 'wait'
         # se já houver exclusive lock da mesma transação
         else:
             return None
@@ -100,16 +98,18 @@ class Operation:
 
 class Scheduler:
     def __init__(self):
-        self.operations = []
+        self.operations = Queue()
         self.tr_manager = Tr_Manager()
         self.lock_manager = Lock_Manager()
         self.final_history = []
+        self.wait_transactions = []
+        self.wait_operations = []
 
     def run(self, history):
         self.parser(history)
         self.execute_operations()
-        for q in self.lock_manager.wait_q.keys():
-            print(f'{q}: {list(self.lock_manager.wait_q[q].queue)}')
+        #for q in self.lock_manager.wait_q.keys():
+        #    print(f'{q}: {list(self.lock_manager.wait_q[q].queue)}')
         print()
         for action in self.final_history:
             print(action)
@@ -123,24 +123,24 @@ class Scheduler:
                     transaction = action[3:]
                     operation = Operation(
                         tr=transaction, action='bt', table=None)
-                    self.operations.append(operation)
+                    self.operations.put(operation)
                 elif action[0] == 'r':
                     transaction = action[1:index_brack]
                     table = action[index_brack+1:]
                     operation = Operation(
                         tr=transaction, action='r', table=table)
-                    self.operations.append(operation)
+                    self.operations.put(operation)
                 elif action[0] == 'w':
                     transaction = action[1:index_brack]
                     table = action[index_brack+1:]
                     operation = Operation(
                         tr=transaction, action='w', table=table)
-                    self.operations.append(operation)
+                    self.operations.put(operation)
                 elif action[0] == 'C':
                     transaction = action[2:]
                     operation = Operation(
                         tr=transaction, action='c', table=None)
-                    self.operations.append(operation)
+                    self.operations.put(operation)
         except:
             print('Erro no input')
 
@@ -153,7 +153,12 @@ class Scheduler:
 
     def execute_operations(self):
         timestamp = 0
-        for op in self.operations:
+        while not self.operations.empty():
+            op = self.operations.get()
+
+            if op.tr in self.wait_transactions:
+                self.wait_operations.append(op)
+                continue
 
             if op.action == 'bt':
                 tr = Tr(id=op.tr, ts=timestamp)
@@ -166,11 +171,21 @@ class Scheduler:
                 if not self.is_active(op.tr):
                     continue
                 # adiciona Shared Lock se possível
-                lock = self.lock_manager.ls(tr=op.tr, table=op.table)
+                lock = self.lock_manager.ls(tr=op.tr, table=op.table, tr_man=self.tr_manager.trs)
                 if lock == None:
                     self.final_history.append(op)
-                elif lock == 'conflict':
-                    pass
+                elif lock == 'wait':
+                    print('wait')
+                    # coloca operação na lista de espera para quando table for liberada
+                    if self.lock_manager.wait_q.get(op.table) == None:
+                        self.lock_manager.wait_q[op.table] = []
+                    self.lock_manager.wait_q[op.table].append(op.tr)
+
+                    self.wait_transactions.append(op.tr)
+                    self.wait_operations.append(op)
+
+                elif lock == 'wound':
+                    print('wound')
                 else:
                     self.final_history.append(lock)
                     self.final_history.append(op)
@@ -180,11 +195,22 @@ class Scheduler:
                 if not self.is_active(op.tr):
                     continue
                 # adiciona exclusive lock se possível
-                lock = self.lock_manager.lx(tr=op.tr, table=op.table)
+                lock = self.lock_manager.lx(tr=op.tr, table=op.table, tr_man=self.tr_manager.trs)
                 if lock == None:
                     self.final_history.append(op)
-                elif lock == 'conflict':
-                    pass
+                elif lock == 'wait':
+                    print('wait')
+
+                    if self.lock_manager.wait_q.get(op.table) == None:
+                        self.lock_manager.wait_q[op.table] = []
+                    self.lock_manager.wait_q[op.table].append(op.tr)
+
+                    self.wait_transactions.append(op.tr)
+                    self.wait_operations.append(op)
+
+                    # coloca operação na lista de espera para quando table for liberada
+                elif lock == 'wound':
+                    print('wound')
                 else:
                     self.final_history.append(lock)
                     self.final_history.append(op)
@@ -197,11 +223,38 @@ class Scheduler:
                 for table in list(self.lock_manager.lock_table.keys()):
                     unlock = self.lock_manager.u(tr=op.tr, table=table)
                     if unlock != False:
+                        wait_list = self.lock_manager.wait_q.get(table)
+                        if wait_list:
+
+                            new_operations = []
+                            copy_wait_operations = list(self.wait_operations)
+                            for operation in self.wait_operations:
+                                if operation.tr in wait_list:
+                                    new_operations.append(operation)
+                                    copy_wait_operations.remove(operation)
+                                if operation.tr in self.wait_transactions:
+                                    self.wait_transactions.remove(operation.tr)
+                            for operation in self.wait_operations:
+                                if operation.tr in wait_list:
+                                    wait_list.remove(operation.tr)
+                            self.wait_operations = copy_wait_operations
+
+
+                            new_queue = Queue()
+                            for operation in new_operations+list(self.operations.queue):
+                                new_queue.put(operation)
+                            #for oper in new_queue.queue:
+                            #    print(oper)
+                            self.operations = new_queue
+                                    
+
                         self.final_history.append(unlock)
 
 
+
 sc = Scheduler()
-sc.run('BT(1)w1(x)r1(x)BT(2)w2(x)r2(y)r1(y)C(1)w2(x)w2(x)C(2)r2(x)')
+#sc.run('BT(1)BT(2)BT(3)w1(x)r2(x)r3(x)C(1)C(2)C(3)')
+sc.run('BT(1)w1(z)r1(x)BT(2)w2(z)r2(y)r1(y)C(1)w2(x)w2(x)C(2)r2(x)')
 
 '''
 wound-wait:
