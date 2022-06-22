@@ -1,6 +1,7 @@
-from importlib.resources import open_binary
+# Paulo Ricardo Fernandes
+# José Lucas
+
 from queue import Queue
-from xxlimited import new
 
 class Tr:
     def __init__(self, id, ts):
@@ -18,6 +19,7 @@ class Lock_Manager:
         self.lock_table = {}
         # x: ['S', [1,2]]
         self.wait_q = {}
+        self.wait_w = {}
 
     # adiciona shared lock no item d para a transação tr caso não exista na lock_table
     def ls(self, tr, table, tr_man):
@@ -104,6 +106,7 @@ class Scheduler:
         self.final_history = []
         self.wait_transactions = []
         self.wait_operations = []
+        self.wound_operations = {}
 
     def run(self, history):
         self.parser(history)
@@ -186,6 +189,32 @@ class Scheduler:
 
                 elif lock == 'wound':
                     print('wound')
+
+                    if self.lock_manager.wait_w.get(op.table) == None:
+                        self.lock_manager.wait_w[op.table] = []
+                    self.lock_manager.wait_w[op.table].append(op.tr)
+
+                    final_history_copy = list(self.final_history)
+                    operations_queue = list(self.operations.queue)
+                    for operation in self.final_history + [op] + list(self.operations.queue):
+                        if operation in self.final_history and operation.tr == op.tr:
+                            final_history_copy.remove(operation)
+                        elif operation in self.operations.queue and operation.tr == op.tr:
+                            operations_queue.remove(operation) 
+                        if operation.action in ('bt', 'r', 'w', 'c') and operation.tr == op.tr:
+                            if self.wound_operations.get(operation.tr) == None:
+                                self.wound_operations[operation.tr] = []
+                            print('op adicionado', operation)
+                            self.wound_operations[operation.tr].append(operation)
+                        
+                        new_queue = Queue()
+                        for ope in operations_queue:
+                            new_queue.put(ope)
+                    
+                    self.final_history = final_history_copy
+                    
+
+
                 else:
                     self.final_history.append(lock)
                     self.final_history.append(op)
@@ -211,6 +240,31 @@ class Scheduler:
                     # coloca operação na lista de espera para quando table for liberada
                 elif lock == 'wound':
                     print('wound')
+
+                    if self.lock_manager.wait_w.get(op.table) == None:
+                        self.lock_manager.wait_w[op.table] = []
+                    self.lock_manager.wait_w[op.table].append(op.tr)
+
+                    final_history_copy = list(self.final_history)
+                    operations_queue = list(self.operations.queue)
+                    for operation in self.final_history + [op] + list(self.operations.queue):
+                        if operation in self.final_history and operation.tr == op.tr:
+                            final_history_copy.remove(operation)
+                        elif operation in self.operations.queue and operation.tr == op.tr:
+                            operations_queue.remove(operation) 
+                        if operation.action in ('bt', 'r', 'w', 'c') and operation.tr == op.tr:
+                            if self.wound_operations.get(operation.tr) == None:
+                                self.wound_operations[operation.tr] = []
+                            print('op adicionado', operation)
+                            self.wound_operations[operation.tr].append(operation)
+                        
+                        new_queue = Queue()
+                        for ope in operations_queue:
+                            new_queue.put(ope)
+                    
+                    self.final_history = final_history_copy
+
+
                 else:
                     self.final_history.append(lock)
                     self.final_history.append(op)
@@ -223,9 +277,9 @@ class Scheduler:
                 for table in list(self.lock_manager.lock_table.keys()):
                     unlock = self.lock_manager.u(tr=op.tr, table=table)
                     if unlock != False:
+
                         wait_list = self.lock_manager.wait_q.get(table)
                         if wait_list:
-
                             new_operations = []
                             copy_wait_operations = list(self.wait_operations)
                             for operation in self.wait_operations:
@@ -234,31 +288,46 @@ class Scheduler:
                                     copy_wait_operations.remove(operation)
                                 if operation.tr in self.wait_transactions:
                                     self.wait_transactions.remove(operation.tr)
+                            wait_list_copy = list(wait_list)
                             for operation in self.wait_operations:
-                                if operation.tr in wait_list:
-                                    wait_list.remove(operation.tr)
+                                if operation.tr in wait_list_copy:
+                                    wait_list_copy.remove(operation.tr)
+
+                            self.lock_manager.wait_q[table] = wait_list_copy
+                            if len(wait_list_copy)==0:
+                                self.lock_manager.wait_q.pop(table)
                             self.wait_operations = copy_wait_operations
 
 
                             new_queue = Queue()
-                            for operation in new_operations+list(self.operations.queue):
+                            for operation in new_operations + list(self.operations.queue):
                                 new_queue.put(operation)
                             #for oper in new_queue.queue:
                             #    print(oper)
                             self.operations = new_queue
-                                    
+                        
+                        wound_list = self.lock_manager.wait_w.get(table)
+                        if wound_list:
+                            for transaction in wound_list:
+                                wound_operations_copy = list(self.wound_operations[transaction])
+                                tr_operations = self.wound_operations[transaction]
 
+                                for operation in tr_operations:
+                                    print('operacao adicionada final', operation)
+                                    self.operations.put(operation)
+                                    wound_operations_copy.remove(operation)
+                                self.wound_operations[transaction] = wound_operations_copy
+
+                            self.lock_manager.wait_w.pop(table)
+                            
+
+                                
+                                
                         self.final_history.append(unlock)
 
 
 
 sc = Scheduler()
-#sc.run('BT(1)BT(2)BT(3)w1(x)r2(x)r3(x)C(1)C(2)C(3)')
+#sc.run('BT(2)BT(1)w1(x)r2(x)C(1)C(2)')
+#sc.run('BT(3)BT(2)BT(1)w1(x)w2(x)w3(x)C(1)C(2)C(3)')
 sc.run('BT(1)w1(z)r1(x)BT(2)w2(z)r2(y)r1(y)C(1)w2(x)w2(x)C(2)r2(x)')
-
-'''
-wound-wait:
-T2 quer um dado de T1
-Se T2 for mais velha, então T1 dá rollback
-Se T2 for mais nova, T2 espera
-'''
